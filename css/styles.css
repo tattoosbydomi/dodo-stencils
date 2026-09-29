@@ -72,8 +72,8 @@ h2 { font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase; color: 
 .upload-hint { font-size: 0.85rem; max-width: 32ch; }
 
 /* ---------- Editor layout ---------- */
-/* Single stacked column on every breakpoint: mode tabs -> export row -> preview
-   -> mode-dependent sliders/settings (see main.js's updateModeVisibility). */
+/* Single stacked column on every breakpoint: mode tabs -> preview -> sliders
+   -> settings -> export (mode-dependent parts: see main.js's updateModeVisibility). */
 .editor-view { display: flex; flex-direction: column; gap: 16px; }
 
 /* ---------- Preview ---------- */
@@ -97,7 +97,10 @@ h2 { font-size: 1rem; letter-spacing: 0.02em; text-transform: uppercase; color: 
 }
 .mode-btn.active { background: var(--accent); color: white; }
 
-/* Owns the aspect-ratio/background/border-radius that .canvas-stage used to own
+/* Always square (height = its own width) on every screen size; the image is
+   letterboxed inside it by main.js's blitToDisplay, whatever its proportions —
+   that only affects the on-screen preview, never the exported file's shape.
+   Owns the aspect-ratio/background/border-radius that .canvas-stage used to own
    alone, plus overflow: auto — once JS grows .canvas-stage past 100% for zoom
    (see main.js's applyZoom), this is what lets you scroll/drag to pan around it,
    for free, with no custom drag code. */
@@ -259,14 +262,15 @@ details.control-group[open] summary { margin-bottom: 10px; }
 
 .hint { font-size: 0.78rem; color: var(--text-dim); line-height: 1.4; }
 
-/* Positioned between the mode tabs and the preview box, per mode — see main.js's
-   updateModeVisibility for which single download button is shown at a time. */
+/* Last section on the page — see main.js's updateModeVisibility for which single
+   download button is shown at a time. */
 .export-row {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px;
 }
+.export-row h2 { margin-bottom: 4px; }
 
 .field-row { display: flex; gap: 10px; margin: 10px 0; }
 .field-row label {
@@ -304,7 +308,3 @@ details.control-group[open] summary { margin-bottom: 10px; }
 .primary-btn:active { background: var(--accent-dim); }
 .secondary-btn { background: var(--panel-raised); color: var(--text); border-color: var(--border); }
 .ghost-btn { width: auto; background: transparent; color: var(--text-dim); border: 1px solid var(--border); padding: 6px 14px; min-height: 36px; }
-
-@media (min-width: 600px) {
-  .canvas-viewport { aspect-ratio: 4 / 3; }
-}

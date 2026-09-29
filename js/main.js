@@ -3,8 +3,9 @@
 // that touches js/ or css/. ASSET_VERSION is threaded through to the
 // dynamically-loaded worker.js and pipeline.js further down, since import
 // specifiers (static or dynamic) don't inherit this file's own query string.
-import { grayToRGBA, tintStencilOverReference, unsharpMaskRGBA } from './pipeline.js?v=3';
-const ASSET_VERSION = '4';
+import { grayToRGBA, tintStencilOverReference, unsharpMaskRGBA } from './pipeline.js?v=4';
+import { encodePng } from './png.js?v=1';
+const ASSET_VERSION = '5';
 
 // Used for BOTH the live preview and the export analysis step (see renderFullResLayers) —
 // deliberately the same constant, not two independently-tunable ones. The network's output
@@ -200,6 +201,10 @@ function setupDisplayCanvas(canvas) {
   canvas.height = Math.max(1, Math.round(rect.height * dpr));
 }
 
+// The preview box is always square (see .canvas-viewport in styles.css), so the
+// image is fitted inside it at its own proportions and centred, with the box's
+// background showing in the leftover bands. Display only — exports are sized
+// from the source photo (computeOutputPixelSize), never from this box.
 function blitToDisplay(displayCanvas, rgba, w, h) {
   displayScratchCanvas.width = w;
   displayScratchCanvas.height = h;
@@ -208,7 +213,10 @@ function blitToDisplay(displayCanvas, rgba, w, h) {
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.clearRect(0, 0, displayCanvas.width, displayCanvas.height);
-  ctx.drawImage(displayScratchCanvas, 0, 0, w, h, 0, 0, displayCanvas.width, displayCanvas.height);
+  const fit = Math.min(displayCanvas.width / w, displayCanvas.height / h);
+  const dw = Math.round(w * fit), dh = Math.round(h * fit);
+  const dx = Math.round((displayCanvas.width - dw) / 2), dy = Math.round((displayCanvas.height - dh) / 2);
+  ctx.drawImage(displayScratchCanvas, 0, 0, w, h, dx, dy, dw, dh);
 }
 
 function resizeDisplayCanvasesAndRedraw() {
@@ -315,8 +323,6 @@ async function loadFile(file) {
   ctx.drawImage(bitmap, 0, 0, previewW, previewH);
   previewImageData = ctx.getImageData(0, 0, previewW, previewH);
 
-  dom.viewport.style.aspectRatio = `${previewW} / ${previewH}`;
-
   dom.uploadView.hidden = true;
   dom.editorView.hidden = false;
   dom.resetBtn.hidden = false;
@@ -366,7 +372,8 @@ async function runPreviewFinalize() {
   setOverlay(true, 'Updating…');
   try {
     const params = readParams();
-    const result = await send({ type: 'previewFinalize', params });
+    const { outWidth, outHeight } = previewRenderSize();
+    const result = await send({ type: 'previewFinalize', params, outWidth, outHeight });
     if (token !== latestFinalizeToken) return; // a newer edit superseded this one
     previewLayers = result;
     renderAllCanvases();
@@ -478,7 +485,7 @@ function percentFromValue(value, min, max) {
 // --- Export ------------------------------------------------------------
 function computeOutputPixelSize() {
   const widthCm = Number(dom.printWidth.value) || 15;
-  const dpi = Number(dom.printDpi.value) || 300;
+  const dpi = Number(dom.printDpi.value) || 203;
   const widthInches = widthCm / 2.54;
   const widthPx = Math.max(1, Math.round(widthInches * dpi));
   let heightPx = widthPx;
@@ -490,7 +497,11 @@ function updateOutputSizeHint() {
   const { widthPx, heightPx, dpi } = computeOutputPixelSize();
   dom.outputSizeHint.textContent = `Output size: ${widthPx} × ${heightPx} px at ${dpi} DPI`;
 }
-[dom.printWidth, dom.printDpi].forEach((elm) => elm.addEventListener('input', updateOutputSizeHint));
+// Print size also changes the preview's render scale (see previewRenderSize).
+[dom.printWidth, dom.printDpi].forEach((elm) => elm.addEventListener('input', () => {
+  updateOutputSizeHint();
+  schedulePreviewFinalize();
+}));
 
 async function renderFullResLayers() {
   const { widthPx, heightPx } = computeOutputPixelSize();
@@ -511,54 +522,40 @@ async function renderFullResLayers() {
     ? unsharpMaskRGBA(imageData.data, analysisW, analysisH)
     : imageData.data.slice();
   const buffer = sourceRgba.buffer;
-  const result = await send({ type: 'export', buffer, width: analysisW, height: analysisH, params }, [buffer]);
-
-  if (analysisW === widthPx && analysisH === heightPx) return result;
-  return upscaleLayers(result, widthPx, heightPx);
+  // The worker renders both layers straight at print size (outWidth × outHeight) —
+  // the 'stencil' line style needs that to threshold at the final pixel grid
+  // instead of being enlarged (and blurred) after the fact.
+  return send({
+    type: 'export', buffer, width: analysisW, height: analysisH, params,
+    outWidth: widthPx, outHeight: heightPx,
+  }, [buffer]);
 }
 
-function upscaleLayer(gray, srcW, srcH, dstW, dstH) {
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = srcW; srcCanvas.height = srcH;
-  srcCanvas.getContext('2d').putImageData(new ImageData(grayToRGBA(gray, srcW, srcH), srcW, srcH), 0, 0);
-
-  const dstCanvas = document.createElement('canvas');
-  dstCanvas.width = dstW; dstCanvas.height = dstH;
-  const dstCtx = dstCanvas.getContext('2d');
-  dstCtx.imageSmoothingEnabled = true;
-  dstCtx.imageSmoothingQuality = 'high';
-  dstCtx.drawImage(srcCanvas, 0, 0, dstW, dstH);
-  const data = dstCtx.getImageData(0, 0, dstW, dstH).data;
-
-  const out = new Float32Array(dstW * dstH);
-  for (let i = 0, p = 0; i < out.length; i++, p += 4) out[i] = data[p];
-  return out;
-}
-
-function upscaleLayers(result, dstW, dstH) {
+// Size the preview's layers are rendered at: the export's own pixel scale
+// relative to the analysis image, so what you see matches what you download
+// (capped at 2x to keep slider updates responsive for very large prints).
+function previewRenderSize() {
+  const { widthPx } = computeOutputPixelSize();
+  const scale = Math.min(2, Math.max(0.25, widthPx / previewW));
   return {
-    width: dstW,
-    height: dstH,
-    lines: upscaleLayer(result.lines, result.width, result.height, dstW, dstH),
-    reference: upscaleLayer(result.reference, result.width, result.height, dstW, dstH),
+    outWidth: Math.max(1, Math.round(previewW * scale)),
+    outHeight: Math.max(1, Math.round(previewH * scale)),
   };
 }
 
-function downloadRGBA(rgba, width, height, filename) {
-  const canvas = document.createElement('canvas');
-  canvas.width = width; canvas.height = height;
-  canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
-  canvas.toBlob((blob) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, 'image/png');
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function downloadGrayscale(gray, width, height, filename) {
-  downloadRGBA(grayToRGBA(gray, width, height), width, height, filename);
+// Downloads carry the chosen DPI in the PNG itself, so printer software opens
+// them at the intended physical size instead of rescaling. A pure black/white
+// layer (the 'stencil' style) is saved as a true 1-bit PNG.
+async function downloadPng(image, filename) {
+  triggerDownload(await encodePng({ ...image, dpi: computeOutputPixelSize().dpi }), filename);
 }
 
 async function withButtonBusy(button, label, fn) {
@@ -581,7 +578,7 @@ dom.exportStencilBtn.addEventListener('click', () => {
   if (!sourceBitmap) return;
   withButtonBusy(dom.exportStencilBtn, 'Rendering…', async () => {
     const result = await renderFullResLayers();
-    downloadGrayscale(result.lines, result.width, result.height, 'stencil.png');
+    await downloadPng({ gray: result.lines, width: result.width, height: result.height }, 'stencil.png');
   });
 });
 
@@ -589,7 +586,7 @@ dom.exportReferenceBtn.addEventListener('click', () => {
   if (!sourceBitmap) return;
   withButtonBusy(dom.exportReferenceBtn, 'Rendering…', async () => {
     const result = await renderFullResLayers();
-    downloadGrayscale(result.reference, result.width, result.height, 'reference.png');
+    await downloadPng({ gray: result.reference, width: result.width, height: result.height }, 'reference.png');
   });
 });
 
@@ -599,7 +596,7 @@ dom.exportColourBtn.addEventListener('click', () => {
     const result = await renderFullResLayers();
     const refOpacity = Number(dom.refOpacity.value) / 100;
     const rgba = tintStencilOverReference(result.lines, result.reference, result.width, result.height, stencilColour, refOpacity);
-    downloadRGBA(rgba, result.width, result.height, 'stencil-with-reference.png');
+    await downloadPng({ rgba, width: result.width, height: result.height }, 'stencil-with-reference.png');
   });
 });
 

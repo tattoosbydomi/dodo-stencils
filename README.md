@@ -21,18 +21,19 @@ Then open the printed URL.
 3. No build step is required — it's plain HTML/CSS/JS.
 4. **Cache-busting:** GitHub Pages gives every file `Cache-Control: max-age=600` and there's no way to change that, so a stale `js`/`css` file can be served (from GitHub's edge cache or a visitor's browser) for up to 10 minutes after a deploy. Whenever a deploy touches `js/` or `css/`, bump the `?v=N` in these three spots together before pushing:
    - `index.html` — the `<link>` and `<script>` tags
-   - `js/main.js` — the `./pipeline.js?v=` import and the `ASSET_VERSION` constant (this one alone threads through to `worker.js` and its own `pipeline.js` import)
+   - `js/main.js` — the `./pipeline.js?v=` and `./png.js?v=` imports and the `ASSET_VERSION` constant (this one alone threads through to `worker.js` and its own `pipeline.js` import)
 
 ## How it works
 
 - **Line art comes from a real neural network, not an edge filter.** A classical filter (Sobel/Canny/XDoG) can only ever find "every edge in the pixels" — it has no way to know which lines an artist would actually keep. `models/informative-drawings.onnx` is a network trained specifically to convert a photo/illustration into line-art, so it produces selective, confident linework much closer to a hand-drawn stencil.
 - `js/worker.js` — runs entirely off the main thread: loads the ONNX model (via `onnxruntime-web`, WASM backend), runs inference once per uploaded image, and caches the result so slider tweaks never re-run the network.
 - `js/pipeline.js` — pure post-processing math (levels cleanup and line thickness, posterize, stencil-over-reference colour tinting). Operates on the network's output and on the original artwork; no DOM access, so it's reusable and easy to test outside the browser.
+- `js/png.js` — small PNG encoder for downloads: writes the chosen DPI into every file, and saves the stencil as a true 1-bit black/white PNG.
 - `js/main.js` — UI wiring: upload, two-phase preview (one-time "analyze" pass + instant slider-driven "finalize" pass), preview modes (Original / Stencil / Stencil + Ref / Split), layer toggle, stencil colour picker, export.
 
 **Two-phase preview:** uploading a photo triggers one network inference pass (a second or two) at a capped working resolution. Every slider after that — Keep Detail, Background Cleanup, Line Thickness, Crisp, Invert, reference tone bands, stencil colour, reference opacity — is cheap post-processing on the cached network output, so the preview stays responsive on mobile despite the heavier underlying model.
 
-**Export resolution:** the network runs at a capped analysis resolution (quality plateaus above this, and it keeps export time reasonable on mobile), then the result is upscaled to your requested print size (width + DPI). This works well because line art is mostly smooth curves, not fine texture.
+**Export resolution:** the network runs at a capped analysis resolution (quality plateaus above this, and it keeps export time reasonable on mobile). The default **Stencil (Smooth & Crisp)** line style then renders natively at your print size (width + DPI, default 203 DPI for thermal stencil printers): the network's *soft* output is enlarged first and only then cut to pure black/white, with stroke-relative thresholding and hysteresis so faint strokes stay continuous, then specks removed and pinholes filled. Thresholding before enlarging (the older styles) is what makes edges jagged and grey. The preview renders at the same pixel scale as the export, so what you see is what you download.
 
 **Three exports:**
 - *Stencil* — binary/high-contrast line art, for a thermal stencil printer.

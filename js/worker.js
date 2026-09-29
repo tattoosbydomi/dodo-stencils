@@ -88,10 +88,13 @@ async function runNetwork(rgba, width, height) {
   return out;
 }
 
-function packLayers(pipeline, rawLineMap, gray, width, height, params) {
-  const lines = pipeline.finalizeLines(rawLineMap, width, height, params);
-  const reference = pipeline.buildReferenceLayer(gray, params);
-  return { lines, reference, width, height };
+// Both layers come back at outW × outH (the final print size for export, or the
+// preview's matching render size) — the 'stencil' line style renders natively at
+// that size, which is what keeps its edges crisp; everything else is enlarged smoothly.
+function packLayers(pipeline, rawLineMap, gray, width, height, params, outW = width, outH = height) {
+  const lines = pipeline.finalizeLines(rawLineMap, width, height, params, outW, outH);
+  const reference = pipeline.resizeGray(pipeline.buildReferenceLayer(gray, params), width, height, outW, outH);
+  return { lines, reference, width: outW, height: outH };
 }
 
 function respondWithLayers(requestId, result) {
@@ -122,18 +125,18 @@ self.onmessage = async (e) => {
 
     if (type === 'previewFinalize') {
       if (!previewCache) throw new Error('No image analyzed yet');
-      const { params } = e.data;
-      const result = packLayers(pipeline, previewCache.rawLineMap, previewCache.gray, previewCache.width, previewCache.height, params);
+      const { params, outWidth, outHeight } = e.data;
+      const result = packLayers(pipeline, previewCache.rawLineMap, previewCache.gray, previewCache.width, previewCache.height, params, outWidth, outHeight);
       respondWithLayers(requestId, result);
       return;
     }
 
     if (type === 'export') {
-      const { buffer, width, height, params } = e.data;
+      const { buffer, width, height, params, outWidth, outHeight } = e.data;
       const rgba = new Uint8ClampedArray(buffer);
       const rawLineMap = await runNetwork(rgba, width, height);
       const gray = pipeline.toGrayscale(rgba, width, height);
-      const result = packLayers(pipeline, rawLineMap, gray, width, height, params);
+      const result = packLayers(pipeline, rawLineMap, gray, width, height, params, outWidth, outHeight);
       respondWithLayers(requestId, result);
       return;
     }
