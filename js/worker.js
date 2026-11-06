@@ -21,8 +21,7 @@ function getSession() {
 }
 
 // The most recently analyzed image. Slider moves and downloads all draw from this, so the
-// network runs only for a new upload or the "sharpen" option, and a download has exactly
-// the same line data as the preview.
+// network runs only for a new upload, and a download has exactly the same line data as the preview.
 let previewCache = null; // { gray, rawLineMap, width, height }
 
 // The network internally downsamples/upsamples by some fixed stride, so an input whose
@@ -107,7 +106,8 @@ async function handle(data) {
 
   if (type === 'previewFinalize') {
     const lines = pipeline.finalizeLines(rawLineMap, width, height, params, outWidth, outHeight);
-    const reference = pipeline.resizeGray(pipeline.buildReferenceLayer(gray, params), width, height, outWidth, outHeight);
+    // Simplified after resizing: enlarging afterwards would blur extra greys back in.
+    const reference = pipeline.buildReferenceLayer(pipeline.resizeGray(gray, width, height, outWidth, outHeight), params);
     respond(requestId, outWidth, outHeight, lines, reference);
     return;
   }

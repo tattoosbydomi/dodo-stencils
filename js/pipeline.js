@@ -18,31 +18,8 @@ export function toGrayscale(rgba, w, h) {
 
 function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-// Photoshop-style levels remap: push everything at/below blackPoint to 0 (line),
-// everything at/above whitePoint to 255 (paper), linear ramp between. This is how
-// the "Keep Detail" / "Background Cleanup" sliders clean up the network's raw
-// (slightly soft/grayish) output into confident line art.
-export function applyLevels(src, blackPoint, whitePoint) {
-  const range = Math.max(1, whitePoint - blackPoint);
-  const out = new Float32Array(src.length);
-  for (let i = 0; i < src.length; i++) {
-    out[i] = clamp255(((src[i] - blackPoint) / range) * 255);
-  }
-  return out;
-}
-
-export function binarize(src, threshold = 128) {
-  const out = new Float32Array(src.length);
-  for (let i = 0; i < src.length; i++) out[i] = src[i] >= threshold ? 255 : 0;
-  return out;
-}
-
-// Otsu's method: picks the cutoff that best separates a grayscale histogram into
-// two classes (line vs. paper) by maximizing between-class variance. Used instead
-// of a fixed threshold (128) so "Crisp" lines stay clean across photos where the
-// network's soft output happens to sit at a different brightness overall — a
-// fixed cutoff either eats thin lines or lets background haze through depending
-// on the image, while this adapts per photo.
+// Otsu's method: picks the cutoff that best separates a grayscale histogram into two classes
+// (line vs. paper) by maximizing between-class variance, so the line thresholds adapt per image.
 export function otsuThreshold(src) {
   const hist = new Array(256).fill(0);
   for (let i = 0; i < src.length; i++) {
@@ -68,137 +45,88 @@ export function otsuThreshold(src) {
   return threshold;
 }
 
-// Zhang-Suen thinning: iteratively erodes a binary foreground (ink) mask down to
-// a 1-pixel-wide skeleton while preserving connectivity and branching (Y/T
-// junctions survive, unlike a naive contour trace which can only represent
-// non-branching paths). This is what turns a thick, unevenly-blurry threshold
-// result into a single clean centerline per stroke.
-// maxIterations bounds worst-case runtime: each outer iteration only erodes one
-// layer off every blob's boundary, so thin stencil lines (the normal case, a
-// handful of iterations) finish long before this cap is ever reached — it only
-// kicks in for a pathological input (e.g. a large solid dark region the network/
-// threshold misclassified as "line"), where full erosion could otherwise take
-// tens of seconds. Any such remainder is still usable, just not fully thinned.
-export function skeletonize(binaryGray, w, h, maxIterations = 40) {
-  const fg = new Uint8Array(w * h);
-  for (let i = 0; i < fg.length; i++) fg[i] = binaryGray[i] < 128 ? 1 : 0;
-
-  const at = (x, y) => (x < 0 || x >= w || y < 0 || y >= h) ? 0 : fg[y * w + x];
-
-  let changed = true;
-  let iterations = 0;
-  while (changed && iterations++ < maxIterations) {
-    changed = false;
-    for (let subIter = 0; subIter < 2; subIter++) {
-      const toRemove = [];
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (!fg[y * w + x]) continue;
-          const p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y);
-          const p5 = at(x + 1, y + 1), p6 = at(x, y + 1), p7 = at(x - 1, y + 1);
-          const p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
-          const ring = [p2, p3, p4, p5, p6, p7, p8, p9];
-          const blackNeighbours = ring.reduce((a, b) => a + b, 0);
-          if (blackNeighbours < 2 || blackNeighbours > 6) continue;
-          let transitions = 0;
-          for (let k = 0; k < 8; k++) {
-            if (ring[k] === 0 && ring[(k + 1) % 8] === 1) transitions++;
-          }
-          if (transitions !== 1) continue;
-          if (subIter === 0) {
-            if (p2 * p4 * p6 !== 0) continue;
-            if (p4 * p6 * p8 !== 0) continue;
-          } else {
-            if (p2 * p4 * p8 !== 0) continue;
-            if (p2 * p6 * p8 !== 0) continue;
-          }
-          toRemove.push(y * w + x);
-        }
-      }
-      if (toRemove.length) {
-        changed = true;
-        for (const i of toRemove) fg[i] = 0;
-      }
-    }
-  }
-
-  const out = new Float32Array(w * h).fill(255);
-  for (let i = 0; i < out.length; i++) if (fg[i]) out[i] = 0;
-  return out;
+function toneBin(v) {
+  const t = Math.round(v);
+  return t < 0 ? 0 : t > 255 ? 255 : t;
 }
 
-// Re-thickens a (typically skeletonized) binary line to a constant radius, so
-// every stroke reads at the same weight regardless of how thick/thin the network's
-// soft output happened to make it before thresholding.
-export function dilate(binaryGray, w, h, radius) {
-  if (radius <= 0) return binaryGray;
-  const fg = new Uint8Array(w * h);
-  for (let i = 0; i < fg.length; i++) fg[i] = binaryGray[i] < 128 ? 1 : 0;
-  const out = new Uint8Array(w * h);
-  const r2 = radius * radius;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (!fg[y * w + x]) continue;
-      for (let dy = -radius; dy <= radius; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -radius; dx <= radius; dx++) {
-          if (dx * dx + dy * dy > r2) continue;
-          const xx = x + dx;
-          if (xx < 0 || xx >= w) continue;
-          out[yy * w + xx] = 1;
-        }
-      }
+/** How many different greys an RGBA image contains, measured as toGrayscale would. */
+export function countTones(rgba) {
+  const seen = new Uint8Array(256);
+  let count = 0;
+  for (let p = 0; p < rgba.length; p += 4) {
+    const t = toneBin(0.2126 * rgba[p] + 0.7152 * rgba[p + 1] + 0.0722 * rgba[p + 2]);
+    if (!seen[t]) {
+      seen[t] = 1;
+      count += 1;
     }
   }
-  const result = new Float32Array(w * h).fill(255);
-  for (let i = 0; i < result.length; i++) if (out[i]) result[i] = 0;
-  return result;
+  return count;
 }
 
-function boxBlur3(src, w, h) {
-  const tmp = new Float32Array(src.length);
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < h; y++) {
-    const row = y * w;
-    for (let x = 0; x < w; x++) {
-      const x0 = Math.max(0, x - 1), x1 = Math.min(w - 1, x + 1);
-      tmp[row + x] = (src[row + x0] + src[row + x] + src[row + x1]) / 3;
-    }
-  }
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) {
-      const y0 = Math.max(0, y - 1), y1 = Math.min(h - 1, y + 1);
-      out[y * w + x] = (tmp[y0 * w + x] + tmp[y * w + x] + tmp[y1 * w + x]) / 3;
-    }
-  }
-  return out;
-}
-
-// Cheap unsharp mask on the source photo (before it ever reaches the line-art
-// network): blur each channel, then push the original away from that blur.
-// Helps when the *photo* itself is soft/low-contrast, which is a case no amount
-// of post-processing the network's output can fix — the network never had a
-// strong gradient to lock onto in the first place.
-export function unsharpMaskRGBA(rgba, w, h, amount = 0.8) {
-  const plane = w * h;
-  const out = new Uint8ClampedArray(rgba.length);
-  for (let c = 0; c < 3; c++) {
-    const channel = new Float32Array(plane);
-    for (let i = 0, p = c; i < plane; i++, p += 4) channel[i] = rgba[p];
-    const blurred = boxBlur3(channel, w, h);
-    for (let i = 0, p = c; i < plane; i++, p += 4) {
-      out[p] = channel[i] + amount * (channel[i] - blurred[i]);
-    }
-  }
-  for (let i = 0, p = 3; i < plane; i++, p += 4) out[p] = 255;
-  return out;
-}
-
+// Reduces an image to exactly `levels` greys, or to every grey it has if that's fewer. The
+// steps go where this image's tones actually are: evenly spaced steps from black to white
+// would leave empty ones whenever a photo doesn't use the full range, so the slider's number
+// wouldn't match the file. This finds the grouping of the image's tones into that many
+// neighbouring bands that changes the image least (Fisher-Jenks, solved exactly by dynamic
+// programming over the at most 256 tones), and paints each band its own average tone.
 export function posterize(src, levels) {
-  const step = 255 / (levels - 1);
+  const hist = new Float64Array(256);
+  for (let i = 0; i < src.length; i++) hist[toneBin(src[i])]++;
+  const tones = [];
+  for (let t = 0; t < 256; t++) if (hist[t]) tones.push(t);
+  const n = tones.length;
+  const k = Math.max(1, Math.min(Math.round(levels), n));
+
+  // Prefix sums, so any band's cost (its squared error around its mean) is instant to work out.
+  const sumW = new Float64Array(n + 1);
+  const sumT = new Float64Array(n + 1);
+  const sumTT = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const t = tones[i];
+    const w = hist[t];
+    sumW[i + 1] = sumW[i] + w;
+    sumT[i + 1] = sumT[i] + w * t;
+    sumTT[i + 1] = sumTT[i] + w * t * t;
+  }
+  const cost = (from, to) => {
+    const w = sumW[to] - sumW[from];
+    const t = sumT[to] - sumT[from];
+    return (sumTT[to] - sumTT[from]) - (t * t) / w;
+  };
+
+  // best[i] = least cost of splitting the first i tones into the current number of bands.
+  let best = new Float64Array(n + 1);
+  for (let i = 1; i <= n; i++) best[i] = cost(0, i);
+  const cuts = [];
+  for (let c = 2; c <= k; c++) {
+    const next = new Float64Array(n + 1).fill(Infinity);
+    const cut = new Int32Array(n + 1);
+    for (let i = c; i <= n; i++) {
+      for (let j = c - 1; j < i; j++) {
+        const total = best[j] + cost(j, i);
+        if (total < next[i]) {
+          next[i] = total;
+          cut[i] = j;
+        }
+      }
+    }
+    best = next;
+    cuts.push(cut);
+  }
+
+  // Walk the cuts back to get the bands, and paint each with its average tone. Two bands can't
+  // round to the same grey, because each average rounds to within that band's own tones.
+  const paint = new Float32Array(256);
+  let end = n;
+  for (let c = k; c >= 1; c--) {
+    const start = c === 1 ? 0 : cuts[c - 2][end];
+    const mean = Math.round((sumT[end] - sumT[start]) / (sumW[end] - sumW[start]));
+    for (let i = start; i < end; i++) paint[tones[i]] = mean;
+    end = start;
+  }
   const out = new Float32Array(src.length);
-  for (let i = 0; i < src.length; i++) out[i] = Math.round(Math.round(src[i] / step) * step);
+  for (let i = 0; i < src.length; i++) out[i] = paint[toneBin(src[i])];
   return out;
 }
 
@@ -388,20 +316,17 @@ function removeSmallRegions(mask, w, h, value, minArea, eightConnected) {
   }
 }
 
-// Default levels the adaptive thresholds are measured against — deliberately the
-// slider DEFAULTS, not the live slider values, so the thresholds stay fixed per
-// image and moving Keep Detail / Background Cleanup actually changes the result
-// (re-measuring after the sliders move would just cancel the slider back out).
+// Default levels the adaptive thresholds are measured against, so the thresholds stay fixed
+// per image and moving Line Detail actually changes the result.
 const REFERENCE_BLACK = 15, REFERENCE_WHITE = 225;
 
-// The 'stencil' line style: pure black/white output with smooth edges and
+// The stencil's lines: pure black/white output with smooth edges and
 // continuous strokes, rendered directly at the final pixel size (outW × outH).
 //
-// Why the other crisp styles look soft/jagged: they threshold at the network's
-// analysis resolution (≤1200px) and only then get enlarged, so every edge is a
-// pixel staircase that the enlargement smears into grey. Here the SOFT darkness
-// map is enlarged first, lightly blurred, and only then cut to black/white — so
-// each edge lands where the smooth gradient crosses the cutoff, at the output's
+// Why edges stay crisp: thresholding at the network's analysis resolution (at most 1200px) and
+// only then enlarging would make every edge a pixel staircase that the enlargement smears into
+// grey. Here the SOFT darkness map is enlarged first, lightly blurred, and only then cut to
+// black/white, so each edge lands where the smooth gradient crosses the cutoff, at the output's
 // own pixel precision.
 //
 // Why strokes don't break up: the network draws faint strokes much lighter than
@@ -430,8 +355,8 @@ function stencilLines(rawLineMap, w, h, outW, outH, params) {
   const refPaper = new Float32Array(refDark.length); // otsuThreshold expects the 0-255 paper-white scale
   for (let i = 0; i < refDark.length; i++) refPaper[i] = 255 - refDark[i] * 255;
   const ref = Math.max(0.05, (255 - otsuThreshold(refPaper)) / 255);
-  // Keep Detail (the black point) also lowers both thresholds, so it recovers
-  // faint strokes directly rather than only darkening the ones already kept.
+  // The black point is now fixed at REFERENCE_BLACK, so this is 1. It's kept so the old
+  // Keep Detail slider can be restored (see DEV-NOTES.md in the dev folder).
   const detail = Math.max(0.2, (REFERENCE_WHITE - params.blackPoint) / (REFERENCE_WHITE - REFERENCE_BLACK));
   const strongLevel = 0.8 * ref * detail * detail, weakLevel = strongLevel * 0.5;
 
@@ -469,65 +394,14 @@ function stencilLines(rawLineMap, w, h, outW, outH, params) {
   return out;
 }
 
-// Post-processes the neural network's raw line-art output (0-255 grayscale,
-// network already produced) into the final "lines" layer, at outW × outH.
-//
-// "Line Thickness" is implemented as a shift of the black/white points
-// together (same knobs "Keep Detail"/"Background Cleanup" already expose),
-// applied before those levels run — not as pixel-radius morphology. Morphology
-// reassigns each pixel to the darkest/lightest value within a radius, which for
-// soft anti-aliased line art is a flood, not a nudge: even radius 1 could wipe
-// thin strokes out entirely (thinner) or blow them into solid blobs (thicker),
-// with nothing gradual in between. Shifting the levels window instead moves
-// where *within the network's existing soft gradient* the line/paper cutoff
-// falls, so it stays continuous and reuses the exact remap that already
-// produces clean results for the other two sliders.
-//
-// `lineStyle` picks how (or whether) that soft gradient then gets crisped up —
-// see index.html's "Line style" dropdown:
-//   'soft'           — the network's gradient as-is, no thresholding.
-//   'threshold'      — flat cutoff at 128 (the original "Crisp lines" behaviour).
-//   'auto-threshold' — same cutoff, but picked per-image via Otsu instead of fixed.
-//   'clean'          — auto-threshold, then skeletonize + re-thicken to a constant
-//                      width, so every stroke reads the same regardless of how
-//                      thick/thin/blurry the raw network output made it.
-//   'stencil'        — smooth pure black/white, rendered natively at outW × outH
-//                      (see stencilLines). The others are computed at the analysis
-//                      size and then enlarged smoothly, as they always were.
+// Turns the neural network's raw line-art output (0-255 grayscale) into the final "lines"
+// layer at outW x outH. The app once offered four other line styles: see DEV-NOTES.md.
 export function finalizeLines(rawLineMap, width, height, params, outW = width, outH = height) {
-  const style = params.lineStyle || 'soft';
-  if (style === 'stencil') {
-    const lines = stencilLines(rawLineMap, width, height, outW, outH, params);
-    if (params.invertLines) {
-      for (let i = 0; i < lines.length; i++) lines[i] = 255 - lines[i];
-    }
-    return lines;
-  }
-
-  const shift = params.lineThickness || 0;
-  const blackPoint = clamp255(params.blackPoint + shift);
-  const whitePoint = clamp255(params.whitePoint + shift);
-  let lines = applyLevels(rawLineMap, blackPoint, whitePoint);
-
-  if (style === 'threshold') {
-    lines = binarize(lines, 128);
-  } else if (style === 'auto-threshold') {
-    lines = binarize(lines, otsuThreshold(lines));
-  } else if (style === 'clean') {
-    lines = binarize(lines, otsuThreshold(lines));
-    lines = skeletonize(lines, width, height);
-    // radius 0 = no dilation at all, i.e. the raw 1px skeleton — the thinnest a
-    // line can be. Line Thickness only ever ADDS width on top of that from here;
-    // it used to have a floor of 1 (a forced "+"-shaped halo on every skeleton
-    // pixel), so "thinnest" was never actually thin — that was the bug.
-    const radius = Math.max(0, Math.min(4, Math.round(shift / 10)));
-    lines = dilate(lines, width, height, radius);
-  }
-
+  const lines = stencilLines(rawLineMap, width, height, outW, outH, params);
   if (params.invertLines) {
     for (let i = 0; i < lines.length; i++) lines[i] = 255 - lines[i];
   }
-  return resizeGray(lines, width, height, outW, outH);
+  return lines;
 }
 
 // Smooth enlargement of a 0-255 plane (clamped, since bicubic can overshoot).

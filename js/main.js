@@ -1,5 +1,5 @@
 import {
-  grayToRGBA, linesToRGBA, tintStencilOverReference, unsharpMaskRGBA,
+  countTones, grayToRGBA, linesToRGBA, tintStencilOverReference,
 } from './pipeline.js';
 import { encodePng } from './png.js';
 import {
@@ -42,8 +42,6 @@ const dom = {
   exportStatus: el('export-status'),
   stencilSliders: el('stencil-sliders'),
   settingsGroup: el('settings-group'),
-  rowModel: el('row-model'),
-  rowSharpen: el('row-sharpen'),
   rowRefPosterize: el('row-ref-posterize'),
   rowRefLevels: el('row-ref-levels'),
   rowRefOpacity: el('row-ref-opacity'),
@@ -90,8 +88,8 @@ function readableError(err) {
 }
 
 // --- Sliders ------------------------------------------------------------
-const sliderIds = ['keep-detail', 'bg-cleanup', 'thickness', 'ref-levels'];
-// Reference Levels is a literal tone-band count, so it keeps its own raw scale; the
+const sliderIds = ['line-detail', 'thickness', 'ref-levels'];
+// Grey Steps is a literal count of greys in the file, so it keeps its own raw scale; the
 // others show a normalised 0-100 reading instead of their real underlying range.
 const RAW_SCALE_IDS = new Set(['ref-levels']);
 const sliders = {};
@@ -120,19 +118,36 @@ document.querySelectorAll('input[type="range"]').forEach(enhanceSlider);
 for (const id of ['invert', 'ref-posterize']) {
   el(`in-${id}`).addEventListener('change', schedulePreviewFinalize);
 }
-el('in-line-style').addEventListener('change', schedulePreviewFinalize);
+el('in-ref-posterize').addEventListener('change', showGreySteps);
 
-// Sharpening changes what the *network* sees, so it needs a fresh analysis.
-el('in-presharpen').addEventListener('change', () => {
-  if (previewAnalyzed) runPreviewAnalysis();
-});
+// Grey Steps only does anything once Simplify is ticked, so it's hidden until then.
+function showGreySteps() {
+  const wanted = SETTINGS_ROWS_BY_MODE[currentMode].includes('rowRefLevels');
+  dom.rowRefLevels.hidden = !wanted || !el('in-ref-posterize').checked;
+}
+
+// The slider can't offer more steps than the design has greys, so that its number is always
+// what the file contains.
+const GREY_STEPS_MIN = 4;
+const GREY_STEPS_MAX = 16;
+function fitGreyStepsToImage(tones) {
+  const { input } = sliders['ref-levels'];
+  input.min = Math.min(GREY_STEPS_MIN, tones);
+  input.max = Math.min(GREY_STEPS_MAX, tones);
+  input.disabled = input.min === input.max;
+  input.value = Math.min(Number(input.value), Number(input.max));
+  input.dispatchEvent(new Event('input', { bubbles: true })); // updates the number and the fill
+}
+
+// Was the Keep Detail slider, removed because it barely changed anything: see DEV-NOTES.md
+// in the dev folder. This is its old default, so default stencils are unchanged.
+const FIXED_BLACK_POINT = 15;
 
 function readParams() {
   const v = (id) => Number(sliders[id].input.value);
   return {
-    blackPoint: v('keep-detail'),
-    whitePoint: v('bg-cleanup'),
-    lineStyle: el('in-line-style').value,
+    blackPoint: FIXED_BLACK_POINT,
+    whitePoint: v('line-detail'),
     lineThickness: v('thickness'),
     invertLines: el('in-invert').checked,
     referencePosterize: el('in-ref-posterize').checked,
@@ -359,6 +374,8 @@ async function loadFile(file) {
   const drawn = drawOnWhite(bitmap, previewW, previewH);
   previewImageData = drawn.imageData;
   sourceCanvas = drawn.canvas;
+  // Counted on the full upload: the smaller copy has extra greys from being shrunk.
+  fitGreyStepsToImage(countTones(drawOnWhite(bitmap, bitmap.width, bitmap.height).imageData.data));
 
   dom.uploadView.hidden = true;
   dom.editorView.hidden = false;
@@ -380,10 +397,7 @@ async function runPreviewAnalysis() {
   updateExportButtons();
   setOverlay(true, 'Analyzing artwork…');
   try {
-    const sourceRgba = el('in-presharpen').checked
-      ? unsharpMaskRGBA(previewImageData.data, previewW, previewH)
-      : previewImageData.data.slice();
-    const { buffer } = sourceRgba;
+    const { buffer } = previewImageData.data.slice();
     await send({ type: 'previewAnalyze', buffer, width: previewW, height: previewH }, [buffer]);
     if (forImage !== imageId) return; // replaced while it was running
     previewAnalyzed = true;
@@ -475,11 +489,11 @@ dom.refOpacity.addEventListener('input', () => {
 
 // --- Tabs ----------------------------------------------------------------
 const SETTINGS_ROWS_BY_MODE = {
-  stencil: ['rowModel', 'rowSharpen', 'rowColour'],
+  stencil: ['rowColour'],
   reference: ['rowRefPosterize', 'rowRefLevels'],
-  colour: ['rowModel', 'rowRefPosterize', 'rowRefLevels', 'rowRefOpacity', 'rowColour'],
+  colour: ['rowRefPosterize', 'rowRefLevels', 'rowRefOpacity', 'rowColour'],
 };
-const ALL_SETTINGS_ROWS = ['rowModel', 'rowSharpen', 'rowRefPosterize', 'rowRefLevels', 'rowRefOpacity', 'rowColour'];
+const ALL_SETTINGS_ROWS = ['rowRefPosterize', 'rowRefLevels', 'rowRefOpacity', 'rowColour'];
 
 function setMode(mode) {
   currentMode = mode;
@@ -492,6 +506,7 @@ function setMode(mode) {
   dom.stencilSliders.hidden = mode !== 'stencil';
   const visibleRows = new Set(SETTINGS_ROWS_BY_MODE[mode]);
   for (const key of ALL_SETTINGS_ROWS) dom[key].hidden = !visibleRows.has(key);
+  showGreySteps();
   dom.blackSwatch.hidden = mode !== 'stencil'; // black lines don't stand out on a photo
   showActiveSwatch();
   dom.exportStatus.textContent = '';
@@ -549,7 +564,6 @@ const OUTPUTS = {
 function downloadKey(mode) {
   return JSON.stringify([
     imageId, mode, readParams(), computeOutputPixelSize(), lineColours[mode], dom.refOpacity.value,
-    el('in-presharpen').checked,
   ]);
 }
 
@@ -562,10 +576,7 @@ async function buildDownload(mode) {
   let referenceBuffer = null;
   if (mode !== 'stencil') {
     const { imageData } = drawOnWhite(sourceBitmap, widthPx, heightPx);
-    const rgba = el('in-presharpen').checked
-      ? unsharpMaskRGBA(imageData.data, widthPx, heightPx)
-      : imageData.data;
-    referenceBuffer = rgba.buffer;
+    referenceBuffer = imageData.data.buffer;
     transfer.push(referenceBuffer);
   }
 

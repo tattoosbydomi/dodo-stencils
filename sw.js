@@ -3,7 +3,7 @@
 // Cache first, so the app opens instantly and works with no signal. When you change any
 // file, bump VERSION. That's the only version number in the app: the browser spots the
 // changed sw.js, downloads the new set in the background, and the app offers an Update button.
-const VERSION = 'v1';
+const VERSION = 'v5';
 const CACHE = `dodo-stencils-${VERSION}`;
 
 const ASSETS = [

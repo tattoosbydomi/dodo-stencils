@@ -55,17 +55,14 @@
     <!-- Stencil mode only. -->
     <div id="stencil-sliders">
       <label class="slider-row">
-        <span>Keep Detail <output id="out-keep-detail"></output></span>
-        <input type="range" id="in-keep-detail" min="0" max="120" step="1" value="15">
-      </label>
-
-      <label class="slider-row">
-        <span>Background Cleanup <output id="out-bg-cleanup"></output></span>
-        <input type="range" id="in-bg-cleanup" min="150" max="255" step="1" value="225">
+        <span>Line Detail <output id="out-line-detail"></output></span>
+        <small class="slider-help">Slide right to bring in fainter lines, left for only the strongest. More detail also means heavier lines.</small>
+        <input type="range" id="in-line-detail" min="150" max="255" step="1" value="225">
       </label>
 
       <label class="slider-row">
         <span>Line Thickness <output id="out-thickness"></output></span>
+        <small class="slider-help">Slide right for thicker lines, left for finer. Thicker also closes small gaps.</small>
         <input type="range" id="in-thickness" min="-25" max="25" step="1" value="0">
       </label>
 
@@ -80,28 +77,17 @@
     <details class="control-group" id="settings-group" open>
       <summary><h2>Settings</h2></summary>
 
-      <label class="select-row" id="row-model">
-        <span>Line style</span>
-        <select id="in-line-style">
-          <option value="stencil" selected>Stencil (Smooth &amp; Crisp)</option>
-          <option value="soft">Soft (Network)</option>
-          <option value="threshold">Crisp (Fixed Threshold)</option>
-          <option value="auto-threshold">Crisp (Auto Threshold)</option>
-          <option value="clean">Clean Lines (Skeleton + Re-stroke)</option>
-        </select>
-      </label>
-
-      <label class="checkbox-row" id="row-sharpen"><input type="checkbox" id="in-presharpen"> Sharpen source photo before analysis</label>
-
-      <label class="checkbox-row" id="row-ref-posterize"><input type="checkbox" id="in-ref-posterize"> Simplify reference image into tone bands</label>
+      <label class="checkbox-row" id="row-ref-posterize"><input type="checkbox" id="in-ref-posterize"> <span>Simplify reference image into tone bands<small class="slider-help">Turns smooth shading into flat steps of grey.</small></span></label>
 
       <label class="slider-row" id="row-ref-levels">
-        <span>Reference Levels <output id="out-ref-levels"></output></span>
+        <span>Grey Steps <output id="out-ref-levels"></output></span>
+        <small class="slider-help">Slide right for smoother shading, left for bolder, flatter tones.</small>
         <input type="range" id="in-ref-levels" min="4" max="16" step="1" value="8">
       </label>
 
       <label class="slider-row" id="row-ref-opacity">
         <span>Reference Opacity <output id="out-ref-opacity"></output></span>
+        <small class="slider-help">Slide left to fade the design so the lines stand out. At 0, it’s just lines on white.</small>
         <input type="range" id="in-ref-opacity" min="0" max="100" step="1" value="60">
       </label>
 

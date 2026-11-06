@@ -609,3 +609,19 @@ details.control-group[open] summary { margin-bottom: .6rem; }
 /* Six colours on one row, still large enough to tap. */
 .swatch-row { flex-wrap: nowrap; gap: .4rem; }
 .swatch-btn { flex: 1 1 0; width: auto; height: auto; min-width: 0; max-width: 48px; aspect-ratio: 1; }
+
+/* One line of guidance under each slider's name. */
+.slider-help {
+  display: block;
+  margin-bottom: .1rem;
+  font-family: var(--serif);
+  font-size: .98rem;
+  font-style: italic;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.3;
+  text-transform: none;
+  color: var(--ink-soft);
+}
+.checkbox-row .slider-help { margin: .1rem 0 0; }
+.slider-row input[type="range"]:disabled { opacity: .45; cursor: default; }
