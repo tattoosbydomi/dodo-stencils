@@ -1,7 +1,7 @@
 // Minimal PNG encoder, used instead of canvas.toBlob because the canvas can only
 // write 8-bit RGBA with no resolution info. This one writes:
-//   - a true 1-bit black/white PNG when the image is pure black/white (the
-//     'stencil' line style), so nothing downstream can mistake it for greyscale;
+//   - transparency, for stencils that go on a layer above the design;
+//   - a true 1-bit black/white PNG when a greyscale plane is pure black/white;
 //   - a pHYs chunk with the chosen DPI, so printer software opens the file at
 //     the intended physical size instead of rescaling it.
 // Compression uses the browser's built-in CompressionStream ('deflate' = zlib,
@@ -39,7 +39,15 @@ async function zlibDeflate(bytes) {
 }
 
 // Every row starts with a filter-type byte (0 = none).
-function buildRows(width, height, { gray, rgba }) {
+function buildRows(width, height, { gray, rgba, hasAlpha }) {
+  if (rgba && hasAlpha) {
+    const stride = 1 + width * 4;
+    const raw = new Uint8Array(stride * height);
+    for (let y = 0; y < height; y++) {
+      raw.set(rgba.subarray(y * width * 4, (y + 1) * width * 4), y * stride + 1);
+    }
+    return { raw, bitDepth: 8, colorType: 6 };
+  }
   if (rgba) {
     const stride = 1 + width * 3;
     const raw = new Uint8Array(stride * height);
@@ -91,7 +99,7 @@ function canvasFallback(width, height, { gray, rgba }) {
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 }
 
-// image: { width, height, dpi, gray (0-255 plane) | rgba (Uint8ClampedArray) }
+// image: { width, height, dpi, gray (0-255 plane) | rgba (Uint8ClampedArray), hasAlpha }
 export async function encodePng(image) {
   const { width, height, dpi } = image;
   if (typeof CompressionStream === 'undefined') return canvasFallback(width, height, image);

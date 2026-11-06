@@ -1,54 +1,69 @@
 # Stencil Generator
 
-Turns your finished digital tattoo artwork into a print-ready stencil, entirely in the browser (no server, no account, no per-use cost, nothing uploaded anywhere).
+Turns finished tattoo artwork into a stencil, entirely on the phone: no server, no account, nothing uploaded anywhere. It's made for an iPhone and works offline once it has been opened online.
 
-## Running locally
+## How it's used
 
-Any static file server works — ES modules and Web Workers require `http://`, not `file://`. Double-click `Start Stencil Generator.cmd` (Windows), or run:
+1. Design on a 2031 x 2870 px Procreate canvas (172 x 243 mm at 300 DPI) and export a PNG.
+2. Upload it here. The download has exactly the upload's pixels, so it lands exactly on top of the design.
+3. Download the stencil, which has a transparent background, and insert it into Procreate as a new layer.
+4. Correct it by hand, hide the design layer, and print from Procreate. Lines should be black, and the white background layer switched on, before printing.
+
+Width and DPI fill in from the upload. Editing either one changes the output from then on, until the next upload.
+
+**Saving to Photos:** a website can't save straight to an iPhone's Photos. Download opens the share sheet instead, where Save Image puts it in Photos. The file is made ahead of time, because Safari only opens the sheet straight after a tap. If it isn't ready yet, the button asks for one more tap.
+
+**Preview:** two fingers zoom where they are and move the image. One finger only ever scrolls the page, and pinching back out returns to the full view. Pinching anywhere else does nothing.
+
+## Run it locally
+
+Needs `http://`, not `file://`. Double-click `Start Stencil Generator.cmd`, or:
 
 ```
 npx serve .
-# or
-python -m http.server 8000
 ```
 
-Then open the printed URL.
+## Publish to GitHub Pages
 
-## Deploying to GitHub Pages
+Everything in this folder goes in the repo. In Settings > Pages, choose the branch and `/ (root)`. It's about 32 MB, nearly all of it the model and the engine, both within GitHub's file limits.
 
-1. Push this folder's contents to a repo (or to a `stencil_generator/` path if kept alongside other projects). This includes `models/informative-drawings.onnx` (~17MB) — GitHub Pages serves it like any other static file.
-2. In the repo's Settings → Pages, set the source to the branch/folder containing `index.html`.
-3. No build step is required — it's plain HTML/CSS/JS.
-4. **Cache-busting:** GitHub Pages gives every file `Cache-Control: max-age=600` and there's no way to change that, so a stale `js`/`css` file can be served (from GitHub's edge cache or a visitor's browser) for up to 10 minutes after a deploy. Whenever a deploy touches `js/` or `css/`, bump the `?v=N` in these three spots together before pushing:
-   - `index.html` — the `<link>` and `<script>` tags
-   - `js/main.js` — the `./pipeline.js?v=` and `./png.js?v=` imports and the `ASSET_VERSION` constant (this one alone threads through to `worker.js` and its own `pipeline.js` import)
+**When you change any file, bump `VERSION` at the top of `sw.js`.** That's the only version number in the app. Without the bump, installed copies keep the old version. Bumping it makes the app download the new files in the background and show an Update button. If you add a file, add it to `ASSETS` in `sw.js` too, or it won't be there offline.
+
+GitHub's web upload replaces files but doesn't delete them, so remove renamed or deleted ones by hand.
+
+Backups of earlier versions and the tests live next to this folder, in `App - Dodo stencils (dev)`, so they don't get published.
 
 ## How it works
 
-- **Line art comes from a real neural network, not an edge filter.** A classical filter (Sobel/Canny/XDoG) can only ever find "every edge in the pixels" — it has no way to know which lines an artist would actually keep. `models/informative-drawings.onnx` is a network trained specifically to convert a photo/illustration into line-art, so it produces selective, confident linework much closer to a hand-drawn stencil.
-- `js/worker.js` — runs entirely off the main thread: loads the ONNX model (via `onnxruntime-web`, WASM backend), runs inference once per uploaded image, and caches the result so slider tweaks never re-run the network.
-- `js/pipeline.js` — pure post-processing math (levels cleanup and line thickness, posterize, stencil-over-reference colour tinting). Operates on the network's output and on the original artwork; no DOM access, so it's reusable and easy to test outside the browser.
-- `js/png.js` — small PNG encoder for downloads: writes the chosen DPI into every file, and saves the stencil as a true 1-bit black/white PNG.
-- `js/main.js` — UI wiring: upload, two-phase preview (one-time "analyze" pass + instant slider-driven "finalize" pass), preview modes (Original / Stencil / Stencil + Ref / Split), layer toggle, stencil colour picker, export.
+- **Line art comes from a neural network, not an edge filter.** `models/informative-drawings.onnx` is trained to turn a picture into selective, confident linework.
+- **One analysis per image.** The model runs once on a copy of the upload at most 1200 px on its longest side. Slider moves and downloads all draw from that result, so they don't re-run it, and the lines in a download match the preview.
+- **Downloads are full size.** The stencil is enlarged from the model's soft output first and only then cut to solid lines, which keeps its edges clean at any size. The reference is made directly from the full upload, not the analysis copy.
+- **The preview is capped at about 2.7 megapixels** so sliders stay quick on a phone, so its edges can differ very slightly from the download.
 
-**Two-phase preview:** uploading a photo triggers one network inference pass (a second or two) at a capped working resolution. Every slider after that — Keep Detail, Background Cleanup, Line Thickness, Crisp, Invert, reference tone bands, stencil colour, reference opacity — is cheap post-processing on the cached network output, so the preview stays responsive on mobile despite the heavier underlying model.
+| File | What it does |
+| --- | --- |
+| `js/worker.js` | Runs the model and the image processing off the main thread. |
+| `js/pipeline.js` | Image processing: line clean-up, reference, colours. No DOM. |
+| `js/png.js` | Writes PNGs with the DPI recorded and, for stencils, transparency. |
+| `js/viewport.js` | Pinch-to-zoom maths. No DOM. |
+| `js/touch.js` | Blocks page zoom, and makes sliders respond to a tap anywhere on the strip. |
+| `js/main.js` | The screen: upload, preview, tabs, downloads. |
+| `sw.js` | Offline cache and updates. |
 
-**Export resolution:** the network runs at a capped analysis resolution (quality plateaus above this, and it keeps export time reasonable on mobile). The default **Stencil (Smooth & Crisp)** line style then renders natively at your print size (width + DPI, default 203 DPI for thermal stencil printers): the network's *soft* output is enlarged first and only then cut to pure black/white, with stroke-relative thresholding and hysteresis so faint strokes stay continuous, then specks removed and pinholes filled. Thresholding before enlarging (the older styles) is what makes edges jagged and grey. The preview renders at the same pixel scale as the export, so what you see is what you download.
+The three downloads:
 
-**Three exports:**
-- *Stencil* — binary/high-contrast line art, for a thermal stencil printer.
-- *Grayscale Reference* — continuous-tone grayscale copy, for a regular printer with a grey ink tank, to use as a shading reference alongside the stencil.
-- *Stencil + Reference (Colour)* — the line art tinted in a chosen colour and layered on top of the grayscale reference, so both are visible in one image.
+- **Stencil:** lines in black or a chosen colour, on transparent.
+- **Reference:** the design in greyscale.
+- **Stencil + Reference:** coloured lines over the reference, on a solid background.
 
-## Why this beats a generic AI image prompt
+## Limits
 
-ChatGPT/Gemini-style image generation *regenerates* the image through a diffusion model — for realism/portrait tattoo work that means hallucinated details and an inaccurate likeness. This tool instead runs a purpose-built line-extraction network directly on your actual artwork (image-to-image, not generative), so the output stays faithful to your composition, and every stage after that (detail level, cleanup, line thickness) is manually tunable rather than a black box.
+- **iOS version:** the engine needs WebAssembly SIMD, so iPhones need iOS 16.4 or newer. Older ones get a message saying so.
+- **Print size:** output above 36 megapixels is refused, because it would run a phone out of memory.
+- **Line character:** the model won't reproduce hand-drawn conventions such as solid versus dashed lines. It gives a strong starting point, not a finished stencil.
 
-## Model credit & license
+## Credits
 
-`models/informative-drawings.onnx` is the ONNX export (by [Joseph Rocca](https://github.com/josephrocca/image-to-line-art-js)) of **Informative Drawings** by Caroline Chan et al. ("Learning to Generate Line Drawings that Convey Geometry and Semantics", CVPR 2022) — [original repo](https://github.com/carolineec/informative-drawings), MIT licensed. `onnxruntime-web` (Microsoft, MIT licensed) is loaded from jsDelivr at runtime to run it.
-
-## Known limitations
-
-- Best results are on clean digital artwork (the intended input); real skin/tattoo photos are noisier and need more slider tuning (Background Cleanup / Keep Detail especially).
-- The network won't reproduce hand-drawn conventions like solid-vs-dashed-vs-dotted line semantics — that judgment call still belongs to you. This tool gets you a strong, editable starting point, not a finished stencil.
+- `models/informative-drawings.onnx`: ONNX export by [Joseph Rocca](https://github.com/josephrocca/image-to-line-art-js) of **Informative Drawings** by Caroline Chan et al. (CVPR 2022), [original repo](https://github.com/carolineec/informative-drawings), MIT licensed.
+- `lib/ort/`: [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) 1.31.1, MIT licensed.
+- `fonts/`: Fraunces and Newsreader, SIL Open Font License (see the `OFL-*.txt` files).

@@ -87,6 +87,8 @@
 [hidden] { display: none !important; }
 
 html, body { margin: 0; padding: 0; }
+/* No page zoom: panning only. main.js handles what iOS Safari ignores here. */
+html, body { touch-action: pan-x pan-y; }
 html {
   background-color: var(--ground);
   background-image:
@@ -224,7 +226,7 @@ h2 {
   background: rgba(231, 222, 205, .55);
 }
 .mode-btn {
-  flex: 1;
+  flex: 1 1 auto;
   border: none;
   background: transparent;
   color: var(--muted);
@@ -242,13 +244,8 @@ h2 {
 .mode-btn:hover { color: var(--ink); }
 .mode-btn.active { background: var(--ink); color: var(--ground); }
 
-/* Always square (height = its own width) on every screen size; the image is
-   letterboxed inside it by main.js's blitToDisplay, whatever its proportions —
-   that only affects the on-screen preview, never the exported file's shape.
-   Owns the aspect-ratio/background/border-radius that .canvas-stage used to own
-   alone, plus overflow: auto — once JS grows .canvas-stage past 100% for zoom
-   (see main.js's applyZoom), this is what lets you scroll/drag to pan around it,
-   for free, with no custom drag code. */
+/* Always square, with the image letterboxed inside it (display only: never the
+   download's shape). One finger scrolls the page; two fingers are handled by main.js. */
 .canvas-viewport {
   position: relative;
   width: 100%;
@@ -257,67 +254,16 @@ h2 {
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
   box-shadow: 0 14px 22px -14px var(--vig-edge);
-  overflow: auto;
-}
-.canvas-stage {
-  position: relative;
-  width: 100%;
-  height: 100%;
+  overflow: hidden;
+  touch-action: pan-y;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
-.canvas-stage canvas {
-  position: absolute;
-  inset: 0;
+#preview-canvas {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
-}
-#canvas-original { z-index: 1; }
-#canvas-stencil { z-index: 2; }
-#canvas-reference { z-index: 2; }
-#canvas-colour { z-index: 3; }
-
-/* zoom buttons are the website's round review-carousel arrows */
-.zoom-controls {
-  display: flex;
-  align-items: center;
-  gap: .5rem;
-  margin-top: .6rem;
-}
-.zoom-btn {
-  flex: 0 0 auto;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  border: 1px solid var(--hairline);
-  background: var(--ground-hi);
-  color: var(--ink);
-  font-family: var(--sans);
-  font-size: 1.1rem;
-  font-weight: 500;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-  transition: background var(--t-fast) ease, color var(--t-fast) ease, border-color var(--t-fast) ease;
-}
-.zoom-btn:hover { background: var(--ink); color: var(--ground); border-color: var(--ink); }
-.zoom-fit-btn {
-  width: auto;
-  min-width: 64px;
-  border-radius: var(--r-pill);
-  padding: 0 1.1rem;
-  font-size: .64rem;
-  font-weight: 600;
-  letter-spacing: .2em;
-  text-transform: uppercase;
-}
-.zoom-hint {
-  margin-left: .35rem;
-  font-family: var(--serif);
-  font-style: italic;
-  font-size: .9rem;
-  color: var(--muted);
-  line-height: 1.35;
 }
 
 .processing-overlay {
@@ -403,13 +349,53 @@ details.control-group[open] summary { margin-bottom: .6rem; }
   color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
+/* A tall strip that's easy to hit with a finger, with the whole row responding to a tap
+   (see js/touch.js). Sideways drags move the slider; vertical swipes scroll the page. */
 .slider-row input[type="range"] {
+  --fill: 0%;
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
   width: 100%;
-  height: 32px;
+  height: 52px;
   margin: 0;
-  accent-color: var(--ink);
+  padding: 0;
+  background: transparent;
   cursor: pointer;
+  touch-action: pan-y;
 }
+.slider-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+  background: linear-gradient(to right, var(--ink) var(--fill), var(--ground-lo) var(--fill));
+}
+.slider-row input[type="range"]::-moz-range-track {
+  height: 12px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--hairline);
+  background: linear-gradient(to right, var(--ink) var(--fill), var(--ground-lo) var(--fill));
+}
+.slider-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 32px;
+  height: 32px;
+  margin-top: -11px;
+  border-radius: 50%;
+  border: 2px solid var(--bar);
+  background: var(--ink);
+  box-shadow: 0 1px 4px rgba(56, 44, 30, .45);
+}
+.slider-row input[type="range"]::-moz-range-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--bar);
+  background: var(--ink);
+  box-shadow: 0 1px 4px rgba(56, 44, 30, .45);
+}
+.slider-row input[type="range"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .select-row {
   display: block;
@@ -571,5 +557,55 @@ details.control-group[open] summary { margin-bottom: .6rem; }
 @media (max-width: 420px) {
   .app-header h1 { font-size: 1.08rem; letter-spacing: .07em; white-space: nowrap; }
   .mode-btn { letter-spacing: .08em; }
-  .zoom-hint { font-size: .82rem; }
 }
+/* Too narrow for STENCIL + REFERENCE on one line: three lines, never two. */
+.mode-btn-long span { display: inline; }
+@media (max-width: 389px) {
+  .mode-btn { flex: 1 1 0; line-height: 1.3; padding: .5rem .2rem; }
+  .mode-btn-long span { display: block; }
+  /* The title and New Photo share a narrow header. */
+  .app-header { gap: .5rem; }
+  .app-header h1 { font-size: .92rem; letter-spacing: .04em; min-width: 0; }
+  #reset-btn { flex: 0 0 auto; padding-left: .8rem; padding-right: .8rem; letter-spacing: .08em; white-space: nowrap; }
+}
+
+.error-banner {
+  margin: 0 0 1rem;
+  padding: .75rem 1rem;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  background: var(--ground-hi);
+  color: var(--accent);
+  font-family: var(--sans);
+  font-size: .95rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+#export-status:empty { display: none; }
+.primary-btn:disabled { opacity: .5; cursor: default; transform: none; }
+
+.update-bar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(env(safe-area-inset-bottom) + 12px);
+  z-index: 40;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: .5rem .5rem .5rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+  background: var(--bar);
+  font-family: var(--sans);
+  font-size: .95rem;
+  font-weight: 600;
+  box-shadow: 0 8px 20px -10px rgba(0, 0, 0, .45);
+}
+
+/* Six colours on one row, still large enough to tap. */
+.swatch-row { flex-wrap: nowrap; gap: .4rem; }
+.swatch-btn { flex: 1 1 0; width: auto; height: auto; min-width: 0; max-width: 48px; aspect-ratio: 1; }

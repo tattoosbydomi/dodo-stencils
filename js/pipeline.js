@@ -211,6 +211,18 @@ export function grayToRGBA(gray, w, h) {
   return out;
 }
 
+// The stencil on nothing: each pixel is the line colour, as opaque as that pixel is dark.
+// Paper is fully transparent, so the lines sit directly on whatever layer is below.
+export function linesToRGBA(lines, w, h, colourHex) {
+  const { r, g, b } = hexToRgb(colourHex);
+  const out = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0, p = 0; i < lines.length; i++, p += 4) {
+    out[p] = r; out[p + 1] = g; out[p + 2] = b;
+    out[p + 3] = 255 - lines[i];
+  }
+  return out;
+}
+
 function hexToRgb(hex) {
   const num = parseInt(hex.replace('#', ''), 16);
   return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
@@ -472,7 +484,7 @@ function stencilLines(rawLineMap, w, h, outW, outH, params) {
 // produces clean results for the other two sliders.
 //
 // `lineStyle` picks how (or whether) that soft gradient then gets crisped up —
-// see index.html's "Line Style" dropdown for the four methodologies being compared:
+// see index.html's "Line style" dropdown:
 //   'soft'           — the network's gradient as-is, no thresholding.
 //   'threshold'      — flat cutoff at 128 (the original "Crisp lines" behaviour).
 //   'auto-threshold' — same cutoff, but picked per-image via Otsu instead of fixed.

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>Stencil Generator</title>
 <meta name="theme-color" content="#F3EADA">
 <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
@@ -11,14 +11,11 @@
 <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 <link rel="shortcut icon" href="favicon.ico">
 <link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Stencils">
 <meta name="description" content="Turn a reference photo into a print-ready realism tattoo stencil.">
-<!-- Cache-busting: GitHub Pages sets Cache-Control: max-age=600 on every file and
-     gives no way to change that, so a stale copy can be served (from GitHub's edge
-     cache or a visitor's browser) for up to 10 minutes after a deploy. Bumping the
-     ?v= below whenever js/ or css/ changes makes each new deploy a new URL, which
-     no cache layer can serve stale — must match ASSET_VERSION in js/main.js. -->
-<link rel="stylesheet" href="css/styles.css?v=13">
+<link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
 <header class="app-header">
@@ -28,11 +25,13 @@
 
 <main id="app">
 
+  <p class="error-banner" id="error-banner" role="alert" hidden></p>
+
   <section id="upload-view" class="upload-view">
     <label for="file-input" class="upload-dropzone" id="dropzone">
       <svg viewBox="0 0 24 24" width="40" height="40" aria-hidden="true"><path fill="currentColor" d="M12 3l5 5h-3v6h-4V8H7l5-5zm-7 14h14v2H5v-2z"/></svg>
       <span class="upload-title">Upload a photo</span>
-      <span class="upload-hint">Tap to choose a PNG or JPEG. Nothing leaves your device — all processing happens right here in the browser, using a bundled AI model (~17MB, downloaded once and cached).</span>
+      <span class="upload-hint">Tap to choose a PNG or JPEG. Nothing leaves your device — all processing happens right here in the browser, using a built-in AI model. The first visit downloads it (about 32 MB), then the app works offline.</span>
     </label>
     <input type="file" id="file-input" accept="image/png,image/jpeg" hidden>
   </section>
@@ -40,30 +39,17 @@
   <section id="editor-view" class="editor-view" hidden>
 
     <div class="preview-modes" role="tablist">
-      <button class="mode-btn" data-mode="original" role="tab" aria-selected="false">Original</button>
       <button class="mode-btn active" data-mode="stencil" role="tab" aria-selected="true">Stencil</button>
       <button class="mode-btn" data-mode="reference" role="tab" aria-selected="false">Reference</button>
-      <button class="mode-btn" data-mode="colour" role="tab" aria-selected="false">ST + RF</button>
+      <button class="mode-btn mode-btn-long" data-mode="colour" role="tab" aria-selected="false"><span>Stencil</span> <span>+</span> <span>Reference</span></button>
     </div>
 
     <div class="canvas-viewport" id="canvas-viewport">
-      <div class="canvas-stage" id="canvas-stage">
-        <canvas id="canvas-original" hidden></canvas>
-        <canvas id="canvas-stencil"></canvas>
-        <canvas id="canvas-reference" hidden></canvas>
-        <canvas id="canvas-colour" hidden></canvas>
-        <div class="processing-overlay" id="processing-overlay" hidden>
-          <div class="spinner"></div>
-          <span id="processing-label">Processing&hellip;</span>
-        </div>
+      <canvas id="preview-canvas"></canvas>
+      <div class="processing-overlay" id="processing-overlay" hidden>
+        <div class="spinner"></div>
+        <span id="processing-label">Processing&hellip;</span>
       </div>
-    </div>
-
-    <div class="zoom-controls" id="zoom-controls">
-      <button type="button" class="zoom-btn" id="zoom-out-btn" aria-label="Zoom out">&minus;</button>
-      <button type="button" class="zoom-btn zoom-fit-btn" id="zoom-reset-btn">Fit</button>
-      <button type="button" class="zoom-btn" id="zoom-in-btn" aria-label="Zoom in">+</button>
-      <span class="zoom-hint">Pinch or scroll to zoom &mdash; inspect at print size before exporting</span>
     </div>
 
     <!-- Stencil mode only. -->
@@ -95,7 +81,7 @@
       <summary><h2>Settings</h2></summary>
 
       <label class="select-row" id="row-model">
-        <span>Model</span>
+        <span>Line style</span>
         <select id="in-line-style">
           <option value="stencil" selected>Stencil (Smooth &amp; Crisp)</option>
           <option value="soft">Soft (Network)</option>
@@ -120,8 +106,9 @@
       </label>
 
       <div class="swatch-block" id="row-colour">
-        <span>Stencil Colour</span>
-        <div class="swatch-row" id="colour-swatches" role="radiogroup" aria-label="Stencil colour">
+        <span>Line Colour</span>
+        <div class="swatch-row" id="colour-swatches" role="radiogroup" aria-label="Line colour">
+          <button class="swatch-btn" id="swatch-black" data-colour="#000000" style="--swatch: #000000" aria-label="Black" aria-pressed="false"></button>
           <button class="swatch-btn active" data-colour="#FF007F" style="--swatch: #FF007F" aria-label="Electric magenta" aria-pressed="true"></button>
           <button class="swatch-btn" data-colour="#FF0000" style="--swatch: #FF0000" aria-label="Vivid scarlet" aria-pressed="false"></button>
           <button class="swatch-btn" data-colour="#FF5500" style="--swatch: #FF5500" aria-label="Safety orange" aria-pressed="false"></button>
@@ -131,28 +118,34 @@
       </div>
     </details>
 
-    <!-- Export: last on the page. Width/DPI are shared across modes; only the
-         download button matching data-mode-btn is shown. -->
+    <!-- Export: last on the page. Width/DPI are shared across tabs and follow the upload until
+         edited; only the download button matching data-mode-btn is shown. -->
     <section class="export-row" id="export-row">
       <h2>Export</h2>
       <div class="field-row">
         <label>Width (cm)
-          <input type="number" id="in-print-width" min="0.5" step="0.1" value="15">
+          <input type="number" id="in-print-width" min="0.5" step="0.01" value="17.2" inputmode="decimal">
         </label>
         <label>DPI
-          <input type="number" id="in-print-dpi" min="72" max="1200" step="1" value="203">
+          <input type="number" id="in-print-dpi" min="72" max="1200" step="1" value="300" inputmode="numeric">
         </label>
       </div>
       <p class="hint" id="output-size-hint"></p>
 
-      <button class="primary-btn" id="export-stencil-btn" data-mode-btn="stencil">Download Stencil (thermal printer)</button>
+      <button class="primary-btn" id="export-stencil-btn" data-mode-btn="stencil">Download Stencil</button>
       <button class="primary-btn" id="export-reference-btn" data-mode-btn="reference">Download Grayscale Reference</button>
-      <button class="primary-btn" id="export-colour-btn" data-mode-btn="colour">Download Stencil + Reference (Colour)</button>
+      <button class="primary-btn" id="export-colour-btn" data-mode-btn="colour">Download Stencil + Reference</button>
+      <p class="hint" id="export-status" role="status"></p>
     </section>
 
   </section>
 </main>
 
-<script type="module" src="js/main.js?v=14"></script>
+<div class="update-bar" id="update-bar" hidden>
+  <span>A new version is ready.</span>
+  <button type="button" class="ghost-btn" id="update-now">Update</button>
+</div>
+
+<script type="module" src="js/main.js"></script>
 </body>
 </html>

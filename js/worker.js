@@ -1,44 +1,34 @@
-// Classic (non-module) worker: onnxruntime-web is loaded via importScripts (its
-// distributed build is UMD, not an ES module), while our own pipeline.js is
-// pulled in via dynamic import() — supported in classic workers in all current
-// evergreen browsers, and keeps pipeline.js a normal ES module.
-importScripts('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.10.0/dist/ort.min.js');
+// Classic (non-module) worker: the AI engine's distributed build is loaded via
+// importScripts, while our own pipeline.js is pulled in via dynamic import().
+// The engine lives in this site, not on a CDN, so the app works with no signal.
+importScripts('../lib/ort/ort.wasm.min.js');
 
-// Inside a worker loaded via importScripts, onnxruntime-web can't auto-detect
-// where its .wasm binaries live (that detection relies on document/script-tag
-// context, which doesn't exist here) — without this it silently falls back to
-// a same-origin path, gets our index.html back on a 404, and fails trying to
-// parse HTML as WASM. Point it at the CDN explicitly.
-ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.10.0/dist/';
+const ENGINE_URL = new URL('../lib/ort/', self.location.href).href;
+ort.env.wasm.wasmPaths = ENGINE_URL;
+// GitHub Pages can't send the headers multi-threading needs, so be explicit about it.
+ort.env.wasm.numThreads = 1;
 
 const MODEL_URL = new URL('../models/informative-drawings.onnx', self.location.href).href;
 
-// Cache-busting: carry the ?v= this worker was instantiated with (see
-// ASSET_VERSION in main.js) through to pipeline.js, since a dynamic import()
-// specifier doesn't inherit it automatically.
-const ASSET_VERSION = new URLSearchParams(self.location.search).get('v') || '1';
-let pipelinePromise = import(`./pipeline.js?v=${ASSET_VERSION}`);
+const pipelinePromise = import('./pipeline.js');
 let sessionPromise = null;
 function getSession() {
   if (!sessionPromise) {
     sessionPromise = ort.InferenceSession.create(MODEL_URL, { executionProviders: ['wasm'] });
+    sessionPromise.catch(() => { sessionPromise = null; }); // so a later attempt can try again
   }
   return sessionPromise;
 }
 
-// Cache of the most recently analyzed preview image, so slider/dropdown tweaks
-// (levels/thickness/line style/invert/reference) never re-run the network — only
-// a fresh photo upload or toggling "sharpen source photo" does (that one changes
-// what the network is actually looking at, see main.js).
+// The most recently analyzed image. Slider moves and downloads all draw from this, so the
+// network runs only for a new upload or the "sharpen" option, and a download has exactly
+// the same line data as the preview.
 let previewCache = null; // { gray, rawLineMap, width, height }
 
-// The network internally downsamples/upsamples by some fixed stride, so an
-// input whose dimensions aren't a multiple of that stride comes back a pixel
-// or two larger than requested (e.g. 659 -> 660) — silently reinterpreting
-// that buffer at the original size is what caused the sheared/distorted
-// output. Padding up to a safe multiple (with edge-replication, so we're not
-// inventing new content at the border) and cropping back down afterward
-// sidesteps the issue for any input size.
+// The network internally downsamples/upsamples by some fixed stride, so an input whose
+// dimensions aren't a multiple of that stride comes back a pixel or two larger than requested.
+// Padding up to a safe multiple (with edge-replication, so we're not inventing new content at
+// the border) and cropping back down afterward sidesteps the issue for any input size.
 const NETWORK_STRIDE = 32;
 function padToMultiple(value, multiple) {
   return Math.ceil(value / multiple) * multiple;
@@ -85,70 +75,69 @@ async function runNetwork(rgba, width, height) {
       out[y * width + x] = v < 0 ? 0 : v > 255 ? 255 : v;
     }
   }
+  outputTensor.dispose?.();
   return out;
 }
 
-// Both layers come back at outW × outH (the final print size for export, or the
-// preview's matching render size) — the 'stencil' line style renders natively at
-// that size, which is what keeps its edges crisp; everything else is enlarged smoothly.
-function packLayers(pipeline, rawLineMap, gray, width, height, params, outW = width, outH = height) {
-  const lines = pipeline.finalizeLines(rawLineMap, width, height, params, outW, outH);
-  const reference = pipeline.resizeGray(pipeline.buildReferenceLayer(gray, params), width, height, outW, outH);
-  return { lines, reference, width: outW, height: outH };
+function respond(requestId, width, height, lines, reference) {
+  const lineBuf = lines ? Float32Array.from(lines).buffer : null;
+  const referenceBuf = reference ? Float32Array.from(reference).buffer : null;
+  self.postMessage(
+    { requestId, width, height, lineBuf, referenceBuf },
+    [lineBuf, referenceBuf].filter(Boolean),
+  );
 }
 
-function respondWithLayers(requestId, result) {
-  const lineBuf = Float32Array.from(result.lines).buffer;
-  const referenceBuf = Float32Array.from(result.reference).buffer;
-  self.postMessage({
-    requestId, width: result.width, height: result.height,
-    lineBuf, referenceBuf,
-  }, [lineBuf, referenceBuf]);
+async function handle(data) {
+  const { type, requestId } = data;
+  const pipeline = await pipelinePromise;
+
+  if (type === 'previewAnalyze') {
+    const { buffer, width, height } = data;
+    const rgba = new Uint8ClampedArray(buffer);
+    const rawLineMap = await runNetwork(rgba, width, height);
+    previewCache = { rawLineMap, gray: pipeline.toGrayscale(rgba, width, height), width, height };
+    self.postMessage({ requestId, type: 'previewAnalyzeDone' });
+    return;
+  }
+
+  if (!previewCache) throw new Error('No image analyzed yet');
+  const { params, outWidth, outHeight } = data;
+  const { rawLineMap, gray, width, height } = previewCache;
+
+  if (type === 'previewFinalize') {
+    const lines = pipeline.finalizeLines(rawLineMap, width, height, params, outWidth, outHeight);
+    const reference = pipeline.resizeGray(pipeline.buildReferenceLayer(gray, params), width, height, outWidth, outHeight);
+    respond(requestId, outWidth, outHeight, lines, reference);
+    return;
+  }
+
+  if (type === 'export') {
+    const lines = data.wantLines
+      ? pipeline.finalizeLines(rawLineMap, width, height, params, outWidth, outHeight)
+      : null;
+    let reference = null;
+    if (data.referenceBuffer) {
+      const fullRgba = new Uint8ClampedArray(data.referenceBuffer);
+      reference = pipeline.buildReferenceLayer(pipeline.toGrayscale(fullRgba, outWidth, outHeight), params);
+    }
+    respond(requestId, outWidth, outHeight, lines, reference);
+    return;
+  }
+
+  throw new Error(`Unknown message type: ${type}`);
 }
 
-self.onmessage = async (e) => {
-  const { type, requestId } = e.data;
-  try {
-    const pipeline = await pipelinePromise;
-
-    if (type === 'previewAnalyze') {
-      const { buffer, width, height } = e.data;
-      const rgba = new Uint8ClampedArray(buffer);
-      const [rawLineMap, gray] = await Promise.all([
-        runNetwork(rgba, width, height),
-        Promise.resolve(pipeline.toGrayscale(rgba, width, height)),
-      ]);
-      previewCache = { rawLineMap, gray, width, height };
-      self.postMessage({ requestId, type: 'previewAnalyzeDone' });
-      return;
-    }
-
-    if (type === 'previewFinalize') {
-      if (!previewCache) throw new Error('No image analyzed yet');
-      const { params, outWidth, outHeight } = e.data;
-      const result = packLayers(pipeline, previewCache.rawLineMap, previewCache.gray, previewCache.width, previewCache.height, params, outWidth, outHeight);
-      respondWithLayers(requestId, result);
-      return;
-    }
-
-    if (type === 'export') {
-      const { buffer, width, height, params, outWidth, outHeight } = e.data;
-      const rgba = new Uint8ClampedArray(buffer);
-      const rawLineMap = await runNetwork(rgba, width, height);
-      const gray = pipeline.toGrayscale(rgba, width, height);
-      const result = packLayers(pipeline, rawLineMap, gray, width, height, params, outWidth, outHeight);
-      respondWithLayers(requestId, result);
-      return;
-    }
-
-    throw new Error(`Unknown message type: ${type}`);
-  } catch (err) {
-    // Not every failure here is a normal Error with a .message — onnxruntime-web's
-    // wasm backend can throw a bare wasm trap (e.g. on an out-of-memory allocation
-    // at large input sizes) whose .message is undefined. Posting that straight
-    // through made `error: undefined`, which every caller's `if (error)` check
-    // reads as "no error", silently treating a failed analysis as a success.
+// One job at a time: the engine can't run two analyses at once, and this keeps results
+// in the order they were asked for.
+let queue = Promise.resolve();
+self.onmessage = (e) => {
+  const { requestId } = e.data;
+  queue = queue.then(() => handle(e.data)).catch((err) => {
+    // Not every failure here is a normal Error with a .message — the wasm backend can throw a
+    // bare trap (e.g. out of memory) whose .message is undefined, and posting that straight
+    // through would read as "no error" to the caller.
     const message = (err && err.message) ? err.message : String(err);
     self.postMessage({ requestId, error: message });
-  }
+  });
 };
